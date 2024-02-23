@@ -24,48 +24,49 @@ import (
 )
 
 type Rectangle struct {
-	Left   int
-	Top    int
-	Width  int
-	Height int
+	Left   int `json:"left,omitempty"`
+	Top    int `json:"top,omitempty"`
+	Width  int `json:"width,omitempty"`
+	Height int `json:"height,omitempty"`
+}
+
+type Dimensions struct {
+	Rectangle
+}
+
+type Offsets struct {
+	XOffsetStart  *int `json:"xOffsetStart,omitempty"`
+	XOffsetFinish *int `json:"xOffsetFinish,omitempty"`
+	YOffsetStart  *int `json:"yOffsetStart,omitempty"`
+	YOffsetFinish *int `json:"yOffsetFinish,omitempty"`
+}
+
+type ImageProperties struct {
+	Center            *bool    `json:"center,omitempty"`
+	Opacity           *float32 `json:"opacity,omitempty"`
+	Enabled           *bool    `json:"enabled,omitempty"`
+	UseAsSwitch       *bool    `json:"useAsSwitch,omitempty"`
+	NeedsThrottleType *bool    `json:"needsThrottleType,omitempty"`
+	Image             *image.RGBA
 }
 
 type Display struct {
-	Name              string  `json:"name"`
-	Width             int     `json:"width"`
-	Height            int     `json:"height"`
-	Left              int     `json:"left,omitempty"`
-	Top               int     `json:"top,omitempty"`
-	XOffsetStart      int     `json:"xOffsetStart,omitempty"`
-	XOffsetFinish     int     `json:"xOffsetFinish,omitempty"`
-	YOffsetStart      int     `json:"yOffsetStart,omitempty"`
-	YOffsetFinish     int     `json:"yOffsetFinish,omitempty"`
-	Opacity           float32 `json:"opacity,omitempty"`
-	Enabled           bool    `json:"enabled,omitempty"`
-	UseAsSwitch       bool    `json:"useAsSwitch,omitempty"`
-	NeedsThrottleType bool    `json:"needsThrottleType,omitempty"`
+	Name string `json:"name"`
+	Dimensions
+	Offsets
+	ImageProperties
 }
 
 type Configuration struct {
-	Name              string  `json:"name"`
-	FileName          string  `json:"fileName"`
-	ParentName        string  `json:"parentName"`
-	DisplayName       string  `json:"displayName"`
-	Left              int     `json:"left,omitempty"`
-	Top               int     `json:"top,omitempty"`
-	Width             int     `json:"width,omitempty"`
-	Height            int     `json:"height,omitempty"`
-	XOffsetStart      int     `json:"xOffsetStart,omitempty"`
-	XOffsetFinish     int     `json:"xOffsetFinish,omitempty"`
-	YOffsetStart      int     `json:"yOffsetStart,omitempty"`
-	YOffsetFinish     int     `json:"yOffsetFinish,omitempty"`
-	Center            bool    `json:"center,omitempty"`
-	Opacity           float32 `json:"opacity,omitempty"`
-	Enabled           bool    `json:"enabled,omitempty"`
-	UseAsSwitch       bool    `json:"useAsSwitch,omitempty"`
-	NeedsThrottleType bool    `json:"needsThrottleType,omitempty"`
-	Image             *image.RGBA
-	Configurations    []Configuration `json:"subConfigDef"`
+	Name     string `json:"name"`
+	FileName string `json:"fileName"`
+	Module   *Module
+	Parent   *Configuration
+	Display  *Display
+	Dimensions
+	Offsets
+	ImageProperties
+	Configurations []Configuration `json:"subConfigDef"`
 }
 
 type Module struct {
@@ -86,6 +87,7 @@ type Logger struct {
 	file     *os.File
 	mu       sync.Mutex
 }
+
 type MfdConfig struct {
 	DisplayConfigurationFile string `json:"displayConfigurationFile"`
 	DefaultConfiguration     string `json:"defaultConfiguration"`
@@ -96,6 +98,23 @@ type MfdConfig struct {
 	UseCougar                bool   `json:"useCougar"`
 	ShowRulers               bool   `json:"showRulers"`
 	RulerSize                int    `json:"rulerSize"`
+}
+
+// Define the interface
+type ConfigurationProvider interface {
+    GetDimension() *Dimensions
+	GetOffset() *Offsets
+	GetImageProperties() *ImageProperties
+}
+
+func (o *Outer) GetDimension() *Properties {
+    if o.isSet() {
+        return &o.Properties
+    }
+    if o.Inner != nil {
+        return o.Inner.GetDimension()
+    }
+    return nil
 }
 
 // LoadConfig loads the configuration from a JSON file.
@@ -306,18 +325,18 @@ func getRectangleFromDisplay(display Display) Rectangle {
 
 // Sets a Configuration equal to some of the Display values handles centering if required
 func setConfigToDisplay(config *Configuration, display Display) {
-	config.DisplayName = display.Name
+	config.Display = &display
 	config.NeedsThrottleType = display.NeedsThrottleType
-	if config.Left == 0 {
+	if config.Left == nil {
 		config.Left = display.Left
 	}
-	if config.Top == 0 {
+	if config.Top == nil {
 		config.Top = display.Top
 	}
-	if config.Width == 0 {
+	if config.Width == nil {
 		config.Width = display.Width
 	}
-	if config.Height == 0 {
+	if config.Height == nil {
 		config.Height = display.Height
 	}
 	copyPropertiesFromDisplay(config, display)
@@ -393,36 +412,58 @@ func setFileNamesRecursive(conf *Configuration) {
 	}
 }
 
+var currentTrail string
+
 func enrichConfiguration(module *Module, config *Configuration, displays []Display) {
-	config.ParentName = module.Name
+	config.Module = module
 	if config.FileName == "" {
 		config.FileName = module.FileName
 	}
 
+	currentTrail = fmt.Sprintf("%s-%s-", module.Name, config.Name)
 	// Enrich the main configuration
 	enrichSingleConfig(config, displays)
 
+	if len(config.Configurations) == 0 {
+		fmt.Printf(currentTrail)
+	}
+
 	// Enrich sub-configurations
-	for i := range config.Configurations {
-		subConfig := &config.Configurations[i]
-		subConfig.ParentName = config.Name
+	enrichSubConfigs(config, displays)
+	fmt.Printf(currentTrail)
+}
+
+func enrichSubConfigs(parentConfig *Configuration, displays []Display) {
+	for i := range parentConfig.Configurations {
+		subConfig := &parentConfig.Configurations[i]
+		subConfig.Parent = parentConfig
 		if subConfig.FileName == "" {
-			subConfig.FileName = config.FileName
+			subConfig.FileName = parentConfig.FileName
 		}
+
 		enrichSingleConfig(subConfig, displays)
+		if len(subConfig.Configurations) == 0 {
+			// end of the line!
+			fmt.Printf(currentTrail)
+			currentTrail = ""
+		}
+		enrichSubConfigs(subConfig, displays) // Recursive call to handle nested sub-configurations
 	}
 }
 
 func enrichSingleConfig(config *Configuration, displays []Display) {
 	matched := false
+	currentTrail += fmt.Sprintf("%s-", config.Name)
 	for _, display := range displays {
 		if strings.HasPrefix(config.Name, display.Name) {
+			config.Display = &display
 			setConfigToDisplay(config, display)
 			matched = true
 			break // Break as soon as a match is found
 		}
 	}
 	if !matched {
+		config.Display = nil
 		if config.Opacity == 0 {
 			config.Opacity = 1.0
 		}
@@ -567,18 +608,26 @@ func logCachePath(fullPath string) string {
 }
 
 func createCompositeImage(module *Module, rootConfig Configuration, currentConfig Configuration, parentFileName string) {
+	message := fmt.Sprintf("%s-%s-%s-%s\n", module.Name, rootConfig.Name, currentConfig.Name, logCachePath(parentFileName))
+	instance.Log(message)
+	fmt.Printf(message)
 	var saveImagePath = ""
+	//var printMessage = ""
 	canvas := image.NewRGBA(image.Rect(0, 0, rootConfig.Width, rootConfig.Height))
-	var relativeCachePath = ""
-	var parentRelativeCachePath = logCachePath(parentFileName)
+	//var relativeCachePath = ""
+	//var parentRelativeCachePath = logCachePath(parentFileName)
 
 	// If there is no parent, we are starting a composite to save
 	if parentFileName == "" {
 		saveImagePath = filepath.Join(getCacheBaseDirectroy(), module.Name, rootConfig.Name)
-		relativeCachePath = logCachePath(saveImagePath)
-		instance.Log(fmt.Sprintf("Starting %s", relativeCachePath))
+		//	relativeCachePath = logCachePath(saveImagePath)
+		//	printMessage = fmt.Sprintf("Starting %s\n", relativeCachePath)
+		//	instance.Log(printMessage)
+		//	fmt.Printf(printMessage)
 	} else {
-		instance.Log(fmt.Sprintf("\tContinuing %s", parentRelativeCachePath))
+		//	printMessage = fmt.Sprintf("\tContinuing %s\n", parentRelativeCachePath)
+		//	instance.Log(printMessage)
+		//	fmt.Printf(printMessage)
 		saveImagePath = filepath.Dir(parentFileName)
 		parentImage, err := loadImageFile(parentFileName)
 		if err != nil {
@@ -594,17 +643,21 @@ func createCompositeImage(module *Module, rootConfig Configuration, currentConfi
 		fmt.Println("Error loading image:", err)
 		return
 	}
-	instance.Log(fmt.Sprintf("\t\tDrawing %s onto %s", logCachePath(currentConfig.FileName), parentRelativeCachePath))
+	//instance.Log(fmt.Sprintf("\t\tDrawing %s onto %s", logCachePath(currentConfig.Name), parentRelativeCachePath))
 
 	// Resize the superimposed image to currentConfig.Width and currentConfig.Height
 	// Crop a rectangle from the image based on currentConfig.Left, currentConfig.Top,
 	// currentConfig.Width, and currentConfig.Height
 	offsetWidth := currentConfig.XOffsetFinish - currentConfig.XOffsetStart
 	offsetHeight := currentConfig.YOffsetFinish - currentConfig.YOffsetStart
+
 	croppedImage := cropImage(imageForCurrentConfig, currentConfig.XOffsetStart, currentConfig.YOffsetStart, offsetWidth, offsetHeight)
 
 	// Resize the cropped image to currentConfig.Width and currentConfig.Height
 	croppedImage = resize.Resize(uint(currentConfig.Width), uint(currentConfig.Height), croppedImage, resize.Lanczos3)
+	//printMessage = fmt.Sprintf("\t\t\tResizing %s onto %s as (%d,%d)\n", logCachePath(currentConfig.FileName), logCachePath(parentRelativeCachePath), currentConfig.Width, currentConfig.Height)
+	//instance.Log(printMessage)
+	//fmt.Printf(printMessage)
 
 	// Calculate the draw position based on currentConfig.Left and currentConfig.Top
 	drawPosition := image.Point{}
@@ -682,7 +735,9 @@ func createCompositeImage(module *Module, rootConfig Configuration, currentConfi
 	}
 
 	// Save the composite image to a file
-	instance.Log(fmt.Sprintf("Saving %s", relativeCompositePath))
+	message = fmt.Sprintf("\tSaving %s\n", relativeCompositePath)
+	instance.Log(message)
+	fmt.Printf(message)
 	saveImage(canvas, currentCompositePath)
 
 	// Recursively process sub-configurations
@@ -696,7 +751,7 @@ func drawRuler(targetImage *image.RGBA, rulerSize, interval int, rulerColor colo
 	centerX := targetImage.Bounds().Dx() / 2
 	centerY := targetImage.Bounds().Dy() / 2
 
-	instance.Log(fmt.Sprintf("\t\t\tDrawing X/Y axis ruler every %d px, with center at (%d,%d) and bounds of (%d,%d)", rulerSize, centerX, centerY, targetImage.Bounds().Dx(), targetImage.Bounds().Dy()))
+	//instance.Log(fmt.Sprintf("\t\t\tDrawing X/Y axis ruler every %d px, with center at (%d,%d) and bounds of (%d,%d)", rulerSize, centerX, centerY, targetImage.Bounds().Dx(), targetImage.Bounds().Dy()))
 
 	// Draw the vertical ruler line
 	draw.Draw(targetImage, image.Rect(centerX, 0, centerX+1, targetImage.Bounds().Dy()), &image.Uniform{rulerColor}, image.Point{}, draw.Over)
@@ -744,38 +799,8 @@ func saveImage(img image.Image, filePath string) error {
 	return nil
 }
 
-func ensureDirectoryExist(filePath string) error {
-	dir := filepath.Dir(filePath)
-	return os.MkdirAll(dir, os.ModePerm)
-}
-
 func getCacheBaseDirectroy() string {
 	return filepath.Join(getSavedGamesFolder(), "MFDMF", "Cache")
-}
-
-func getModuleSavePath(module Configuration) string {
-	croppedFilename, err := AddPrefixToFilename(module.FileName, module.DisplayName)
-	if err != nil {
-		return ""
-	}
-	filename := filepath.Base(croppedFilename)
-	newPath := filepath.Join(getCacheBaseDirectroy(), filename)
-	return newPath
-}
-
-func CenterRectangle(outer Rectangle, inner Rectangle) Rectangle {
-	centeredRect := Rectangle{}
-
-	// Calculate the center position of the outer rectangle
-	outerCenterX := outer.Left + outer.Width/2
-	outerCenterY := outer.Top + outer.Height/2
-
-	// Calculate the position of the centered rectangle
-	centeredRect.Left = outerCenterX - inner.Width/2
-	centeredRect.Top = outerCenterY - inner.Height/2
-	centeredRect.Width = inner.Width
-	centeredRect.Height = inner.Height
-	return centeredRect
 }
 
 func clearCacheFolder() string {
@@ -825,6 +850,66 @@ func removeContents(path string) error {
 	return nil
 }
 
+func printConfigurations(moduleName string, configs []Configuration, level int) {
+	for _, config := range configs {
+		fmt.Printf("%sConfiguration: %s-%s\n", getIndentation(level), moduleName, config.Name)
+		printSubConfigDefs(config.Configurations, level+1)
+	}
+}
+
+func printSubConfigDefs(subConfigDefs []Configuration, level int) {
+	for _, subConfigDef := range subConfigDefs {
+		fmt.Printf("%sSubConfigDef: %s-%s\n", getIndentation(level), subConfigDef.Parent, subConfigDef.Name)
+		// Recursively print sub-configurations if present
+		if len(subConfigDef.Configurations) > 0 {
+			fmt.Printf("%sSub-Configurations:\n", getIndentation(level))
+			printSubConfigDefs(subConfigDef.Configurations, level+1)
+		}
+	}
+}
+
+func getIndentation(level int) string {
+	indent := ""
+	for i := 0; i < level; i++ {
+		indent += "\t"
+	}
+	return indent
+}
+
+func loadJSONData(moduleFilePath string, displays []Display) (*Module, error) {
+	// Read the module file
+	moduleData, err := os.ReadFile(moduleFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal module data
+	var module Module
+	err = json.Unmarshal(moduleData, &module)
+	if err != nil {
+		return nil, err
+	}
+
+	// Map the displays to configurations and set Module and Parent pointers
+	for i := range module.Configurations {
+		module.Configurations[i].Module = &module // Set the Module pointer
+
+		// If the configuration has sub-configurations (assuming such a structure exists)
+		for j := range module.Configurations[i].Configurations {
+			module.Configurations[i].Configurations[j].Parent = &module.Configurations[i] // Set the Parent pointer
+		}
+
+		for _, display := range displays {
+			if strings.HasPrefix(module.Configurations[i].Name, display.Name) {
+				module.Configurations[i].Display = &display // Set the Display pointer
+				break
+			}
+		}
+	}
+
+	return &module, nil
+}
+
 var (
 	module     string
 	subModule  string
@@ -849,11 +934,6 @@ func main() {
 	logger := GetLogger()
 	logger.Log("Starting GOMFD!")
 
-	currentUser, err := user.Current()
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
 
 	if clearCache {
 		statusMessage := clearCacheFolder()
@@ -862,6 +942,11 @@ func main() {
 		return
 	}
 
+	currentUser, err := user.Current()
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	configFilePath := currentUser.HomeDir + "\\Saved Games\\MFDMF\\appsettings.json"
 	currentConfig := LoadConfiguration(configFilePath)
 	displayJsonPath := currentConfig.DisplayConfigurationFile
@@ -886,12 +971,19 @@ func main() {
 		setModuleFileName(&module)
 		for i := range module.Configurations {
 			var config = &module.Configurations[i]
+			config.Module = &module
+			config.Parent = nil
 			// enrich Configurations with Displays as required
 			enrichConfiguration(&module, config, displays)
+
 			// Fix up all the paths from relative to absolute
 			setConfigurationFileNames(config)
+
+			// Print out the configurations for the module
+			printConfigurations(module.Name, module.Configurations, 1)
+
 			// Create the images
-			createCompositeImage(&module, *config, *config, "")
+			//createCompositeImage(&module, *config, *config, "")
 		}
 	}
 }
